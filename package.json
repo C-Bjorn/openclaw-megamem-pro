@@ -1,0 +1,9 @@
+{
+  "name": "openclaw-megamem-pro",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Bridge remote MegaMem MCP servers into OpenClaw as native agent tools via StreamableHTTP/SSE over Tailscale",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}

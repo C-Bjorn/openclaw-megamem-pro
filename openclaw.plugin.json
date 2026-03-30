@@ -1,0 +1,38 @@
+{
+  "id": "megamem-pro",
+  "name": "MegaMem Pro",
+  "description": "Connects to remote MegaMem MCP servers over StreamableHTTP/SSE via Tailscale. Servers are auto-discovered from MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN env vars, or declared explicitly in plugin config.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "servers": {
+        "type": "object",
+        "description": "Optional explicit server declarations. Keys are server names. Overrides env discovery for matching names.",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "MCP server base URL (e.g. http://hostname:3838/mcp/)"
+            },
+            "token": {
+              "type": "string",
+              "description": "Bearer token (prefer tokenEnv to avoid storing secrets in config)"
+            },
+            "tokenEnv": {
+              "type": "string",
+              "description": "Name of the env var holding the Bearer token"
+            },
+            "disabled": {
+              "type": "boolean",
+              "description": "Set true to skip this server"
+            }
+          },
+          "required": ["url"]
+        }
+      }
+    }
+  }
+}
