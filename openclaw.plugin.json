@@ -1,5 +1,5 @@
 {
-  "id": "megamem-pro",
+  "id": "openclaw-megamem-pro",
   "name": "MegaMem Pro",
   "description": "Connects to remote MegaMem MCP servers over StreamableHTTP/SSE via Tailscale. Servers are auto-discovered from MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN env vars, or declared explicitly in plugin config.",
   "configSchema": {

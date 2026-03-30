@@ -1,35 +1,38 @@
 /**
- * MegaMem Pro — OpenClaw plugin (compatible with OpenClaw 2026.3.11+)
+ * MegaMem Pro — OpenClaw plugin
  *
  * Bridges remote MCP servers (StreamableHTTP with SSE fallback) into OpenClaw
- * as native agent tools. Each server gets two registered tools:
+ * as native agent tools. Each configured server gets two tools:
  *
  *   megamem_{name}_list  — list available tools on that server
  *   megamem_{name}_call  — call a specific tool by name
  *
- * Server discovery (env wins as base, config can override or disable):
- *   1. Env vars:  MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN
- *   2. Plugin config: plugins.entries.megamem-pro.config.servers
+ * Server discovery (env vars as base, plugin config can override or disable):
+ *   MEGAMEM_<NAME>_URL   — MCP server base URL
+ *   MEGAMEM_<NAME>_TOKEN — Bearer token for that server
  *
- * NOTE: Uses absolute paths to MCP SDK since it lives in /sandbox/node_modules,
- * not in the running OpenClaw's own node_modules.
+ * Example env vars (standard MegaMem tri-profile setup):
+ *   MEGAMEM_AGENT_URL, MEGAMEM_AGENT_TOKEN   → megamem_agent_list / megamem_agent_call
+ *   MEGAMEM_ME_URL, MEGAMEM_ME_TOKEN         → megamem_me_list / megamem_me_call
+ *   MEGAMEM_COMPANY_URL, MEGAMEM_COMPANY_TOKEN → megamem_company_list / megamem_company_call
  */
 
-// Use absolute CJS paths — jiti (the plugin loader) runs in CJS interop mode,
-// and the absolute paths ensure resolution works regardless of which node_modules
-// tree the running OpenClaw process sees.
+// jiti (the OpenClaw plugin loader) runs in CJS interop mode.
+// We use createRequire to load deps from this package's own node_modules,
+// which is correct whether installed via npm or loaded from a local path.
 import { createRequire } from "node:module";
 const _require = createRequire(import.meta.url);
-const { Client } = _require("/sandbox/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js");
-const { StreamableHTTPClientTransport } = _require("/sandbox/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/streamableHttp.js");
-const { SSEClientTransport } = _require("/sandbox/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/sse.js");
-const { Type } = _require("/sandbox/node_modules/@sinclair/typebox/build/cjs/index.js");
+
+const { Client } = _require("@modelcontextprotocol/sdk/client/index.js");
+const { StreamableHTTPClientTransport } = _require("@modelcontextprotocol/sdk/client/streamableHttp.js");
+const { SSEClientTransport } = _require("@modelcontextprotocol/sdk/client/sse.js");
+const { Type } = _require("@sinclair/typebox");
 
 // ---------------------------------------------------------------------------
 // Shared live-client registry: serverName → connected MCP Client
 // Populated by the service on start(), read by tool handlers.
 // ---------------------------------------------------------------------------
-/** @type {Map<string, Client>} */
+/** @type {Map<string, import("@modelcontextprotocol/sdk/dist/cjs/client/index.js").Client>} */
 const clientRegistry = new Map();
 
 // ---------------------------------------------------------------------------
@@ -37,8 +40,8 @@ const clientRegistry = new Map();
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the full set of servers to connect to, merging env discovery and
- * explicit plugin config. Config entries win for matching names.
+ * Resolve the full set of servers from env vars + plugin config.
+ * Config entries override env-discovered entries for matching names.
  *
  * @param {Record<string, unknown>} pluginConfig
  * @returns {Map<string, { url: string, token: string | undefined }>}
@@ -47,7 +50,7 @@ function resolveServers(pluginConfig) {
   /** @type {Map<string, { url: string, token: string | undefined }>} */
   const servers = new Map();
 
-  // 1. Discover from env vars: MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN
+  // 1. Discover from env: MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN
   for (const [key, value] of Object.entries(process.env)) {
     const match = key.match(/^MEGAMEM_(.+)_URL$/);
     if (!match || !value) continue;
@@ -56,17 +59,13 @@ function resolveServers(pluginConfig) {
     servers.set(name, { url: value, token });
   }
 
-  // 2. Merge explicit config (config wins; disabled entries are removed)
+  // 2. Merge explicit plugin config (wins over env; disabled entries removed)
   const configServers = pluginConfig?.servers;
   if (configServers && typeof configServers === "object") {
     for (const [name, entry] of Object.entries(configServers)) {
       if (!entry || typeof entry !== "object") continue;
-      if (entry.disabled === true) {
-        servers.delete(name);
-        continue;
-      }
+      if (entry.disabled === true) { servers.delete(name); continue; }
       if (!entry.url) continue;
-      // Resolve token: inline > tokenEnv > keep env-discovered token
       const token =
         entry.token ??
         (entry.tokenEnv ? process.env[entry.tokenEnv] : undefined) ??
@@ -79,30 +78,20 @@ function resolveServers(pluginConfig) {
 }
 
 // ---------------------------------------------------------------------------
-// MCP connection with StreamableHTTP → SSE fallback
+// MCP connection: StreamableHTTP → SSE fallback
 // ---------------------------------------------------------------------------
 
 /**
- * @param {string | undefined} token
- * @returns {Record<string, string> | undefined}
- */
-function buildHeaders(token) {
-  return token ? { Authorization: `Bearer ${token}` } : undefined;
-}
-
-/**
- * Connect to a single MCP server, trying StreamableHTTP first then SSE.
- *
  * @param {string} name
  * @param {{ url: string, token: string | undefined }} config
  * @param {{ info: Function, warn: Function, error: Function }} logger
- * @returns {Promise<Client>}
+ * @returns {Promise<InstanceType<typeof Client>>}
  */
 async function connectServer(name, config, logger) {
   const { url, token } = config;
-  const headers = buildHeaders(token);
+  const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
 
-  // --- Try StreamableHTTP first ---
+  // Try StreamableHTTP first
   try {
     const client = new Client(
       { name: `openclaw-megamem-pro:${name}`, version: "0.1.0" },
@@ -115,12 +104,10 @@ async function connectServer(name, config, logger) {
     logger.info(`megamem-pro: [${name}] connected via StreamableHTTP (${url})`);
     return client;
   } catch (err) {
-    logger.warn(
-      `megamem-pro: [${name}] StreamableHTTP failed (${err?.message ?? err}), trying SSE...`
-    );
+    logger.warn(`megamem-pro: [${name}] StreamableHTTP failed (${err?.message ?? err}), trying SSE...`);
   }
 
-  // --- SSE fallback (new Client instance — connect() is one-shot) ---
+  // SSE fallback (new Client instance — connect() is one-shot per instance)
   const clientSse = new Client(
     { name: `openclaw-megamem-pro:${name}:sse`, version: "0.1.0" },
     { capabilities: {} }
@@ -142,19 +129,17 @@ async function connectServer(name, config, logger) {
  */
 function createMegaMemService(servers) {
   return {
-    id: "megamem-pro",
+    id: "openclaw-megamem-pro",
 
     async start(ctx) {
       if (servers.size === 0) {
         ctx.logger.info(
           "megamem-pro: no servers configured. " +
-          "Set MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN env vars, or add " +
-          "plugins.entries.megamem-pro.config.servers to your config."
+          "Set MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN env vars and restart."
         );
         return;
       }
 
-      // Connect to all servers concurrently
       const results = await Promise.allSettled(
         Array.from(servers.entries()).map(async ([name, config]) => {
           const client = await connectServer(name, config, ctx.logger);
@@ -162,25 +147,16 @@ function createMegaMemService(servers) {
         })
       );
 
-      const failed = results.filter((r) => r.status === "rejected");
-      for (const r of failed) {
-        ctx.logger.error(
-          `megamem-pro: connection failure — ${r.reason?.message ?? r.reason}`
-        );
+      for (const r of results.filter((r) => r.status === "rejected")) {
+        ctx.logger.error(`megamem-pro: connection failure — ${r.reason?.message ?? r.reason}`);
       }
 
-      ctx.logger.info(
-        `megamem-pro: ${clientRegistry.size}/${servers.size} server(s) connected.`
-      );
+      ctx.logger.info(`megamem-pro: ${clientRegistry.size}/${servers.size} server(s) connected.`);
     },
 
     async stop() {
       for (const [name, client] of clientRegistry.entries()) {
-        try {
-          await client.close();
-        } catch {
-          // ignore close errors on shutdown
-        }
+        try { await client.close(); } catch { /* ignore */ }
         clientRegistry.delete(name);
       }
     },
@@ -191,25 +167,19 @@ function createMegaMemService(servers) {
 // Tool result helpers
 // ---------------------------------------------------------------------------
 
-function errorResult(message) {
-  return { content: [{ type: "text", text: message }] };
-}
-
-function jsonResult(data) {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-}
+const errorResult = (msg) => ({ content: [{ type: "text", text: msg }] });
+const jsonResult = (data) => ({ content: [{ type: "text", text: JSON.stringify(data, null, 2) }] });
 
 // ---------------------------------------------------------------------------
-// Plugin — plain export object (compatible with OpenClaw 2026.3.11)
-// No definePluginEntry wrapper needed; OpenClaw calls .register(api) directly.
+// Plugin export
 // ---------------------------------------------------------------------------
 
-const plugin = {
-  id: "megamem-pro",
+export default {
+  id: "openclaw-megamem-pro",
   name: "MegaMem Pro",
   description:
     "Connects to remote MegaMem MCP servers over StreamableHTTP/SSE. " +
-    "Servers discovered from MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN env vars.",
+    "Servers auto-discovered from MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN env vars.",
 
   register(api) {
     const servers = resolveServers(api.pluginConfig);
@@ -221,12 +191,9 @@ const plugin = {
       );
     }
 
-    // Start the connection service
     api.registerService(createMegaMemService(servers));
 
-    // Register two tools per discovered server
     for (const [name] of servers) {
-      // Sanitise name for use as a tool name identifier
       const safeName = name.replace(/[^a-z0-9_]/gi, "_");
 
       // ── megamem_{name}_list ──────────────────────────────────────────────
@@ -235,29 +202,24 @@ const plugin = {
         description:
           `List all available tools on the MegaMem '${name}' server. ` +
           `Returns tool names, descriptions, and input schemas. ` +
-          `Call this before megamem_${safeName}_call to discover what tools are available.`,
+          `Call this before megamem_${safeName}_call to discover what's available.`,
         parameters: Type.Object({}),
 
         async execute(_id, _params) {
           const client = clientRegistry.get(name);
-          if (!client) {
-            return errorResult(
-              `MegaMem server '${name}' is not connected. ` +
-              `Check MEGAMEM_${name.toUpperCase()}_URL and MEGAMEM_${name.toUpperCase()}_TOKEN env vars.`
-            );
-          }
+          if (!client) return errorResult(
+            `MegaMem server '${name}' is not connected. ` +
+            `Check MEGAMEM_${name.toUpperCase()}_URL and MEGAMEM_${name.toUpperCase()}_TOKEN.`
+          );
           try {
             const page = await client.listTools();
-            const tools = page.tools.map((t) => ({
+            return jsonResult(page.tools.map((t) => ({
               name: t.name,
               description: t.description ?? "",
               inputSchema: t.inputSchema,
-            }));
-            return jsonResult(tools);
+            })));
           } catch (err) {
-            return errorResult(
-              `Failed to list tools on '${name}': ${err?.message ?? String(err)}`
-            );
+            return errorResult(`Failed to list tools on '${name}': ${err?.message ?? String(err)}`);
           }
         },
       });
@@ -267,41 +229,33 @@ const plugin = {
         name: `megamem_${safeName}_call`,
         description:
           `Call a specific tool on the MegaMem '${name}' server. ` +
-          `Use megamem_${safeName}_list first to discover available tools and their argument schemas.`,
+          `Use megamem_${safeName}_list first to discover available tools and their schemas.`,
         parameters: Type.Object({
-          tool: Type.String({
-            description: "Name of the tool to call (from the list)",
-          }),
+          tool: Type.String({ description: "Name of the tool to call" }),
           arguments: Type.Optional(
             Type.Record(Type.String(), Type.Unknown(), {
-              description:
-                "Arguments to pass to the tool (must match the tool's input schema)",
+              description: "Arguments to pass to the tool",
             })
           ),
         }),
 
         async execute(_id, params) {
           const client = clientRegistry.get(name);
-          if (!client) {
-            return errorResult(
-              `MegaMem server '${name}' is not connected. ` +
-              `Check MEGAMEM_${name.toUpperCase()}_URL and MEGAMEM_${name.toUpperCase()}_TOKEN env vars.`
-            );
-          }
+          if (!client) return errorResult(
+            `MegaMem server '${name}' is not connected. ` +
+            `Check MEGAMEM_${name.toUpperCase()}_URL and MEGAMEM_${name.toUpperCase()}_TOKEN.`
+          );
           try {
             const result = await client.callTool({
               name: params.tool,
               arguments: params.arguments ?? {},
             });
-            // Pass MCP result content through directly
             if (result.content && Array.isArray(result.content)) {
               return { content: result.content, isError: result.isError };
             }
             return jsonResult(result);
           } catch (err) {
-            return errorResult(
-              `Failed to call '${params.tool}' on '${name}': ${err?.message ?? String(err)}`
-            );
+            return errorResult(`Failed to call '${params.tool}' on '${name}': ${err?.message ?? String(err)}`);
           }
         },
       });
@@ -310,5 +264,3 @@ const plugin = {
     }
   },
 };
-
-export default plugin;
