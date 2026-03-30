@@ -13,7 +13,7 @@ Each configured MCP server gets two tools registered in your OpenClaw agent:
 
 ```bash
 # From GitHub (available now)
-openclaw plugins install https://github.com/C-Bjorn/openclaw-megamem-pro.git
+Clone and install from GitHub: https://github.com/C-Bjorn/openclaw-megamem-pro.git
 
 # From npm (coming soon)
 # openclaw plugins install openclaw-megamem-pro
