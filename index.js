@@ -15,12 +15,15 @@
  * not in the running OpenClaw's own node_modules.
  */
 
-// Use absolute paths so the running OpenClaw process can find these regardless
-// of which node_modules tree it resolves from.
-import { Client } from "/sandbox/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
-import { StreamableHTTPClientTransport } from "/sandbox/node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js";
-import { SSEClientTransport } from "/sandbox/node_modules/@modelcontextprotocol/sdk/dist/esm/client/sse.js";
-import { Type } from "/sandbox/node_modules/@sinclair/typebox/build/esm/index.mjs";
+// Use absolute CJS paths — jiti (the plugin loader) runs in CJS interop mode,
+// and the absolute paths ensure resolution works regardless of which node_modules
+// tree the running OpenClaw process sees.
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
+const { Client } = _require("/sandbox/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js");
+const { StreamableHTTPClientTransport } = _require("/sandbox/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/streamableHttp.js");
+const { SSEClientTransport } = _require("/sandbox/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/sse.js");
+const { Type } = _require("/sandbox/node_modules/@sinclair/typebox/build/cjs/index.js");
 
 // ---------------------------------------------------------------------------
 // Shared live-client registry: serverName → connected MCP Client
