@@ -1,5 +1,5 @@
 /**
- * MegaMem Pro — OpenClaw plugin
+ * MegaMem Pro — OpenClaw plugin (compatible with OpenClaw 2026.3.11+)
  *
  * Bridges remote MCP servers (StreamableHTTP with SSE fallback) into OpenClaw
  * as native agent tools. Each server gets two registered tools:
@@ -7,16 +7,20 @@
  *   megamem_{name}_list  — list available tools on that server
  *   megamem_{name}_call  — call a specific tool by name
  *
- * Server discovery (merged, config wins):
- *   1. Env vars: MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN
+ * Server discovery (env wins as base, config can override or disable):
+ *   1. Env vars:  MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN
  *   2. Plugin config: plugins.entries.megamem-pro.config.servers
+ *
+ * NOTE: Uses absolute paths to MCP SDK since it lives in /sandbox/node_modules,
+ * not in the running OpenClaw's own node_modules.
  */
 
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { Type } from "@sinclair/typebox";
+// Use absolute paths so the running OpenClaw process can find these regardless
+// of which node_modules tree it resolves from.
+import { Client } from "/sandbox/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
+import { StreamableHTTPClientTransport } from "/sandbox/node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js";
+import { SSEClientTransport } from "/sandbox/node_modules/@modelcontextprotocol/sdk/dist/esm/client/sse.js";
+import { Type } from "/sandbox/node_modules/@sinclair/typebox/build/esm/index.mjs";
 
 // ---------------------------------------------------------------------------
 // Shared live-client registry: serverName → connected MCP Client
@@ -49,7 +53,7 @@ function resolveServers(pluginConfig) {
     servers.set(name, { url: value, token });
   }
 
-  // 2. Merge explicit config (config wins, disabled entries are removed)
+  // 2. Merge explicit config (config wins; disabled entries are removed)
   const configServers = pluginConfig?.servers;
   if (configServers && typeof configServers === "object") {
     for (const [name, entry] of Object.entries(configServers)) {
@@ -76,7 +80,6 @@ function resolveServers(pluginConfig) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the Authorization header value (or undefined if no token).
  * @param {string | undefined} token
  * @returns {Record<string, string> | undefined}
  */
@@ -86,7 +89,6 @@ function buildHeaders(token) {
 
 /**
  * Connect to a single MCP server, trying StreamableHTTP first then SSE.
- * Returns the connected Client, or throws on complete failure.
  *
  * @param {string} name
  * @param {{ url: string, token: string | undefined }} config
@@ -97,13 +99,12 @@ async function connectServer(name, config, logger) {
   const { url, token } = config;
   const headers = buildHeaders(token);
 
-  const client = new Client(
-    { name: `openclaw-megamem-pro:${name}`, version: "0.1.0" },
-    { capabilities: {} }
-  );
-
   // --- Try StreamableHTTP first ---
   try {
+    const client = new Client(
+      { name: `openclaw-megamem-pro:${name}`, version: "0.1.0" },
+      { capabilities: {} }
+    );
     const transport = new StreamableHTTPClientTransport(new URL(url), {
       requestInit: headers ? { headers } : undefined,
     });
@@ -116,14 +117,12 @@ async function connectServer(name, config, logger) {
     );
   }
 
-  // --- SSE fallback ---
-  // Reconstruct client (connect can only be called once per Client instance)
+  // --- SSE fallback (new Client instance — connect() is one-shot) ---
   const clientSse = new Client(
     { name: `openclaw-megamem-pro:${name}:sse`, version: "0.1.0" },
     { capabilities: {} }
   );
-  const sseUrl = new URL(url);
-  const sseTransport = new SSEClientTransport(sseUrl, {
+  const sseTransport = new SSEClientTransport(new URL(url), {
     requestInit: headers ? { headers } : undefined,
   });
   await clientSse.connect(sseTransport);
@@ -137,7 +136,6 @@ async function connectServer(name, config, logger) {
 
 /**
  * @param {Map<string, { url: string, token: string | undefined }>} servers
- * @returns {import("openclaw/plugin-sdk/plugin-entry").PluginService}
  */
 function createMegaMemService(servers) {
   return {
@@ -162,10 +160,10 @@ function createMegaMemService(servers) {
       );
 
       const failed = results.filter((r) => r.status === "rejected");
-      if (failed.length > 0) {
-        for (const r of failed) {
-          ctx.logger.error(`megamem-pro: connection failure — ${r.reason?.message ?? r.reason}`);
-        }
+      for (const r of failed) {
+        ctx.logger.error(
+          `megamem-pro: connection failure — ${r.reason?.message ?? r.reason}`
+        );
       }
 
       ctx.logger.info(
@@ -178,7 +176,7 @@ function createMegaMemService(servers) {
         try {
           await client.close();
         } catch {
-          // ignore close errors
+          // ignore close errors on shutdown
         }
         clientRegistry.delete(name);
       }
@@ -187,32 +185,23 @@ function createMegaMemService(servers) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool helpers
+// Tool result helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Build a standard error tool result.
- * @param {string} message
- * @returns {{ content: Array<{ type: string, text: string }> }}
- */
 function errorResult(message) {
   return { content: [{ type: "text", text: message }] };
 }
 
-/**
- * Build a JSON tool result.
- * @param {unknown} data
- * @returns {{ content: Array<{ type: string, text: string }> }}
- */
 function jsonResult(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
 
 // ---------------------------------------------------------------------------
-// Plugin entry
+// Plugin — plain export object (compatible with OpenClaw 2026.3.11)
+// No definePluginEntry wrapper needed; OpenClaw calls .register(api) directly.
 // ---------------------------------------------------------------------------
 
-export default definePluginEntry({
+const plugin = {
   id: "megamem-pro",
   name: "MegaMem Pro",
   description:
@@ -224,8 +213,8 @@ export default definePluginEntry({
 
     if (servers.size === 0) {
       api.logger.info(
-        "megamem-pro: no servers found during registration. " +
-        "Tools will not be registered until env vars or config are set and gateway restarted."
+        "megamem-pro: no servers found at registration time. " +
+        "Set MEGAMEM_<NAME>_URL + MEGAMEM_<NAME>_TOKEN and restart the gateway."
       );
     }
 
@@ -234,14 +223,16 @@ export default definePluginEntry({
 
     // Register two tools per discovered server
     for (const [name] of servers) {
+      // Sanitise name for use as a tool name identifier
       const safeName = name.replace(/[^a-z0-9_]/gi, "_");
 
-      // --- megamem_{name}_list ---
+      // ── megamem_{name}_list ──────────────────────────────────────────────
       api.registerTool({
         name: `megamem_${safeName}_list`,
         description:
           `List all available tools on the MegaMem '${name}' server. ` +
-          `Returns tool names, descriptions, and input schemas.`,
+          `Returns tool names, descriptions, and input schemas. ` +
+          `Call this before megamem_${safeName}_call to discover what tools are available.`,
         parameters: Type.Object({}),
 
         async execute(_id, _params) {
@@ -268,19 +259,20 @@ export default definePluginEntry({
         },
       });
 
-      // --- megamem_{name}_call ---
+      // ── megamem_{name}_call ──────────────────────────────────────────────
       api.registerTool({
         name: `megamem_${safeName}_call`,
         description:
           `Call a specific tool on the MegaMem '${name}' server. ` +
-          `Use megamem_${safeName}_list first to discover available tools and their schemas.`,
+          `Use megamem_${safeName}_list first to discover available tools and their argument schemas.`,
         parameters: Type.Object({
           tool: Type.String({
             description: "Name of the tool to call (from the list)",
           }),
           arguments: Type.Optional(
             Type.Record(Type.String(), Type.Unknown(), {
-              description: "Arguments to pass to the tool (must match the tool's input schema)",
+              description:
+                "Arguments to pass to the tool (must match the tool's input schema)",
             })
           ),
         }),
@@ -298,7 +290,7 @@ export default definePluginEntry({
               name: params.tool,
               arguments: params.arguments ?? {},
             });
-            // Pass through the MCP result content directly
+            // Pass MCP result content through directly
             if (result.content && Array.isArray(result.content)) {
               return { content: result.content, isError: result.isError };
             }
@@ -314,4 +306,6 @@ export default definePluginEntry({
       api.logger.info(`megamem-pro: registered tools for server '${name}'`);
     }
   },
-});
+};
+
+export default plugin;
